@@ -8,44 +8,85 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import matplotlib.path as path
 import os
+from scipy.stats import gaussian_kde
+import collections
+import random
 
 pp = pprint.PrettyPrinter(indent=4)
 
 def main(argv):
-	cell_array = [2, 3, 4, 11]
+	cell_array = range(1, 19)
 	mac_dict = {}
+	times_dict = {}
+	testing_data = []
+	time_lens = []
 	# cells = {}
 	for cell_num in cell_array:
 		data = []
-		with open('cell_' + str(cell_num) + ".csv", 'rU') as csvfile:
+		with open('data/cell_' + str(cell_num) + '.csv', 'rU') as csvfile:
 			cell_file = csv.reader(csvfile, delimiter=',', skipinitialspace=True)
 			for row in cell_file:
 				data.append(row)
+
+	#get all the unique times
+		unique_times = np.array(data)
+		unique_times = unique_times[:,0]
+		unique_times = sorted(set(unique_times.tolist()))
+	#sort values by their time
+		temp_time_dict = {}
+		times = []
+		for time in unique_times:
+			temp_time_dict[time] = [row for row in data if time in row[0]]
+			times += [len(temp_time_dict[time])]
+		times_prob = calc_kde_dist(times, 150, 1)
+		times_dict[cell_num] = times_prob
+		graphArray(times_prob, "Number of Wi-Fi's detected in " + str(cell_num), cell_num, "num_wifis", "Number of Wi-Fi's")
+
+	#sort out testing data
+		for i in range(10):
+			test_key = random.choice(temp_time_dict.keys())
+			testing_data += temp_time_dict[test_key]
+		for i in testing_data:
+			if i in data:
+				data.remove(i)
 
 	#get all the unique mac addresses
 		unique_macs = np.array(data)
 		unique_macs = unique_macs[:,3]
 		unique_macs = sorted(set(unique_macs.tolist()))
-		# print all_macs
-
-	#sort values by their mac address
+	#sort values by their mac addresses
 		temp_mac_dict = {}
 		for mac in unique_macs:
 			temp_mac_dict[mac] = [row for row in data if mac in row[3]]
 
 	#create histogram of probabilities
 		for key in temp_mac_dict:
-			rss_array = [0.0] * 256
-			count = 0.0
-			for row in temp_mac_dict[key]:
-				rss_array[abs(int(row[4]))] += 1
-				count += 1
-			if count > 3:
+			time_lens += [len(temp_mac_dict[key])]
+			rss_array = [0] * 256
+			count = len(temp_mac_dict[key])
+			if count > 5:
+				for row in temp_mac_dict[key]:
+					rss_array[abs(int(row[4]))] += 1
 				if not key in mac_dict:
 					mac_dict[key] = np.zeros([19, 256])
-				mac_dict[key][cell_num] = np.asarray([x / count for x in rss_array])
+				data = np.asarray(rss_array)
+				freq = []
+				for i in range(len(data)):
+						freq += [i] * data[i]
+				mac_dict[key][cell_num] = calc_kde_dist(freq, 256, .5)
 
-	test(mac_dict, cell_array)
+	times_dict[0] = np.asarray([0] * 150)
+
+	print time_lens
+	q75, q25 = np.percentile(time_lens, [75 ,25])
+	iqr = q75 - q25
+	print iqr
+	print np.median(time_lens)
+	# outputNumWifis(times_dict)
+	# outputData(mac_dict)
+
+	test(mac_dict, cell_array, times_dict, testing_data)
+
 	if len(argv) > 0:
 		if argv[0] == "graph":
 			print "Now graphing...."
@@ -54,85 +95,149 @@ def main(argv):
 			print "Now graphing...."
 			graph_combined(mac_dict)
 
-def test(mac_dict, cell_array):
-	data = []
-	with open("testing.csv", 'rU') as csvfile:
-		cell_file = csv.reader(csvfile, delimiter=',', skipinitialspace=True)
-		for row in cell_file:
-			data.append(row)
+def calc_kde_dist(data, x_len, lambda_val):
+	values = collections.Counter(data)
+	if len(values) == 1:
+		key = values.keys()
+		if(key[0] + 1 < 256):
+			data += [key[0] + 1]
+		if(key[0] - 1 > 0):
+			data += [key[0] - 1]
+	density = gaussian_kde(data)
+	density.covariance_factor = lambda : lambda_val
+	density._compute_covariance()
+	xs = np.arange(0,x_len,1)
+	ys = density(xs)
+	#add a small value to remove probabilities of 0
+	ys = ys + np.float64(.000000001)
+	ys = ys/np.float64(sum(ys))
+	return ys
 
-#get all the unique mac addresses
+def test(mac_dict, cell_array, times_dict, data):
+	confusion_matrix = [[0 for x in range(19)] for x in range(19)] 
+
+#get all the unique times
 	unique_times = np.array(data)
 	unique_times = unique_times[:,0]
 	unique_times = sorted(set(unique_times.tolist()))
-	# print all_macs
 
-#sort values by their mac address
+#sort values by their time
 	temp_time_dict = {}
 	for time in unique_times:
 		temp_time_dict[time] = [row for row in data if time in row[0]]
 
-	test_data = temp_time_dict[temp_time_dict.keys()[0]]
+	print len(temp_time_dict.keys())
+	# test_data = temp_time_dict[temp_time_dict.keys()[0]]
 
+	for key in temp_time_dict:
+		test_data = temp_time_dict[key]
+		# sorted_data = test_data[np.argsort(test_data[:,4])]
+		sorted_data = sorted(test_data, key=operator.itemgetter(4), reverse=True)
+		true_val = int(sorted_data[0][1])
+		cell = calculate_cell(mac_dict, sorted_data, times_dict)
+		if cell:
+			confusion_matrix[true_val][cell] += 1
+	printConfMatrix(confusion_matrix)
+	right = 0
+	for i in range(19):
+		right += confusion_matrix[i][i]
+	print right, len(temp_time_dict.keys()), (right*1.0)/len(temp_time_dict.keys())
 
-	# test_data = {"5c:96:9d:65:76:8d":	-71,
-	# 			 "80:ea:96:eb:1e:fc":	-65,
-	# 			 "60:36:dd:cb:c1:4f":	-55,
-	# 			 "1c:aa:07:7b:39:13":	-71,
-	# 			 "1c:aa:07:b0:7a:b3":	-74,
-	# 			 "00:22:f7:21:d0:38":	-94,
-	# 			 "1c:aa:07:b0:7a:b0":	-73,
-	# 			 "1c:aa:07:b0:7a:b2":	-73,
-	# 			 "1c:aa:07:7b:39:10":	-73,
-	# 			 "1c:aa:07:b0:7a:b1":	-71,
-	# 			 "1c:aa:07:6e:31:a3":	-75,
-	# 			 "1c:aa:07:6e:31:a2":	-75,
-	# 			 "00:0c:f6:a6:3c:e8":	-76,
-	# 			 "1c:aa:07:7b:37:03":	-80,
-	# 			 "48:f8:b3:40:f1:a9":	-96,
-	# 			 "8c:21:0a:9a:98:f8":	-96,
-	# 			 "1c:aa:07:6e:31:a1":	-75}
-
-	# sorted_data = test_data[np.argsort(test_data[:,4])]
-	sorted_data = sorted(test_data, key=operator.itemgetter(4), reverse=True)
-	pp.pprint(sorted_data)
-	# pp.pprint(sorted_data)
-	# print sorted_data[0][0]
-	# pp.pprint(mac_dict[sorted_data[0][0]])
-	probs = [1.0/4] * 19
-	print 
-	print
-	for i in range(6):
+def calculate_cell(mac_dict, sorted_data, times_dict):
+	probs = [1.0/17] * 19
+	max_prob = 0.0
+	cell = 0
+	#use wifi to predict probabilities
+	for i in range(10, 0, -1):
+		if i >= len(sorted_data):
+			for j in range(19):
+				probs[j] = probs[j] * times_dict[j][len(sorted_data)]
+			probs = probs/sum(probs)
+			if(max(probs) > max_prob):
+				cell = np.argmax(probs)
+			# return cell
+			i = len(sorted_data) - 1
 		if sorted_data[i][3] in mac_dict:
-			# print "-"
 			array_for_val = mac_dict[sorted_data[i][3]][:,int(sorted_data[i][4]) * -1]
 			for i in range(len(array_for_val)):
-				probs[i] *= array_for_val[i]
-			# pp.pprint(array_for_val)
-			# print "Sum: ", sum(probs)
-			# print "range: ", cell_range
+				probs[i] = probs[i] * array_for_val[i]
 			new_sum = sum(probs)
-			probs = [x / new_sum for x in probs]
-			print "Prob: ", probs
-		else:
-			print "MAC not found"
+			if new_sum == 0:
+				print "DIVIDING BY ZERO!!!"
+			probs = [(x + .000000001) / (new_sum + (.000000001 * 19)) for x in probs]
+			# for celli in range(len(probs)):
+			# 	if probs[celli] > .8:
+			# 		# print "i know",
+			# 		return celli
+			if(max(probs) > max_prob):
+				cell = np.argmax(probs)
+			# if(int(sorted_data[0][1]) == 4):
+		# else:
+		# 	print "MAC not found"
+	return cell
+
+def printConfMatrix(matrix):
+	for i in range(1, 19):
+		print('{:>2}').format(i),
+	print
+	print
+	for i in matrix[1:]:
+		for j in i[1:]:
+			if j == 0:
+				print('{:>2}').format("-"),
+			else:
+				print('{:>2}').format(j),
+		print
+	print
+	for i in range(1, 19):
+		print('{:>2}').format(i),
+	print
+
+def outputNumWifis(unique_times):
+	with open('numWifiData.csv', 'wb') as csvfile:
+		writer = csv.writer(csvfile, delimiter=',')
+		for cell in range(len(unique_times)):
+			array = unique_times[cell].tolist()
+			writer.writerow(array)
+
+def outputData(mac_dict):
+	with open('wifiData.csv', 'wb') as csvfile:
+		writer = csv.writer(csvfile, delimiter=',')
+		for key in mac_dict:
+			array = mac_dict[key]
+			for i in range(len(array)):
+				writer.writerow([key] + [i] + array[i].tolist())
+
+def graphArray(data, title, cell_num, folder_name, x_label):
+	plt.plot(data)
+	plt.title(title)
+	plt.ylabel('Probability')
+	plt.xlabel(x_label)
+	plt.axis([0, len(data), 0, 0.3])
+	# plt.show()
+	directory = 'graphs/' + folder_name + '/cell' + str(cell_num) + '/'
+	if not os.path.exists(directory):
+		os.makedirs(directory)
+	plt.savefig(directory + title)
+	plt.close()
 
 def graph(mac_dict):
 	# histogram our data with numpy
 	for key in mac_dict:
 		for cell in range(len(mac_dict[key])):
 			data = mac_dict[key][cell]
-			plt.plot(data)
-			plt.title(key)
-			plt.ylabel('Probability')
-			plt.xlabel("RSSI Value")
-			plt.axis([0, 255, 0, 0.3])
-			# plt.show()
-			directory = 'graphs/cell' + str(cell) + '/'
-			if not os.path.exists(directory):
-				os.makedirs(directory)
-			plt.savefig(directory + key)
-			plt.close()
+			if sum(data) != 0:
+				plt.plot(data)
+				plt.title(key)
+				plt.ylabel('Probability')
+				plt.xlabel("RSSI Value")
+				plt.axis([0, 255, 0, 0.3])
+				# plt.show()
+				directory = 'graphs/cell' + str(cell) + '/'
+				if not os.path.exists(directory):
+					os.makedirs(directory)
+				plt.savefig(directory + key)
+				plt.close()
 
 def graph_combined(mac_dict):
 	# histogram our data with numpy
